@@ -516,6 +516,7 @@ const plugin = {
       jsonRpcHandler({
         requestHandler,
         userBuilder,
+        legacyCompat: { enabled: true },
       })
     );
 
@@ -848,15 +849,16 @@ const plugin = {
 
           const parts: Array<Record<string, unknown>> = [];
           if (params.text) {
-            parts.push({ kind: "text", text: params.text });
+            parts.push({
+              content: { $case: "text", value: params.text },
+              filename: "",
+              mediaType: "text/plain",
+            });
           }
           parts.push({
-            kind: "file",
-            file: {
-              uri: params.uri,
-              ...(params.name ? { name: params.name } : {}),
-              ...(params.mimeType ? { mimeType: params.mimeType } : {}),
-            },
+            content: { $case: "url", value: params.uri },
+            filename: params.name ?? "",
+            mediaType: params.mimeType ?? "",
           });
 
           try {
