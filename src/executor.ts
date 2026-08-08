@@ -79,27 +79,23 @@ function asFiniteNumber(value: unknown): number | undefined {
 /**
  * Format an A2A DataPart as human-readable text for the OpenClaw agent.
  *
- * DataPart carries structured JSON data (kind: "data"). Since the Gateway RPC
- * only accepts plain text, we serialize the data with a mimeType hint so the
- * agent can interpret it.
+ * DataPart carries structured JSON data (content.$case === "data"). Since
+ * the Gateway RPC only accepts plain text, we serialize the data with a
+ * mediaType hint so the agent can interpret it.
  */
 function formatDataPartAsText(obj: Record<string, unknown>): string {
-  const data = asObject(obj.data);
-  if (!data) {
-    // Fallback: stringify the entire obj.data even if it's a primitive/array
-    if (obj.data !== undefined && obj.data !== null) {
-      const raw = JSON.stringify(obj.data);
-      const mimeType = asString(obj.mimeType) || "application/json";
-      return `[Data (${mimeType}): ${raw.slice(0, 2000)}]`;
-    }
+  const content = asObject(obj.content);
+  const data = content ? (content as { value?: unknown }).value : undefined;
+  const mediaType = asString(obj.mediaType) || "application/json";
+
+  if (data === undefined || data === null) {
     return "";
   }
 
-  const mimeType = asString(obj.mimeType) || "application/json";
   const raw = JSON.stringify(data);
   // Truncate very large payloads to prevent overwhelming the agent context
   const preview = raw.length > 2000 ? raw.slice(0, 2000) + "…" : raw;
-  return `[Data (${mimeType}): ${preview}]`;
+  return `[Data (${mediaType}): ${preview}]`;
 }
 
 /**
@@ -109,31 +105,56 @@ function formatDataPartAsText(obj: Record<string, unknown>): string {
  * so file parts must be serialized into text. URI-based files include the URL
  * so the agent can reference or fetch them; inline base64 files include a size
  * hint since the raw bytes cannot be forwarded through the text channel.
+ *
+ * v1.0 Part shape: `{ content: { $case: "url" | "raw" | "data", value: ... },
+ * filename, mediaType }`.
  */
 function formatFilePartAsText(obj: Record<string, unknown>): string {
-  const file = asObject(obj.file);
-  if (!file) {
+  const content = asObject(obj.content);
+  if (!content) {
     return "";
   }
+  const contentCase = (content as { $case?: unknown }).$case;
 
-  // Sanitize name/mimeType: strip control chars and newlines to prevent
+  // Sanitize name/mediaType: strip control chars and newlines to prevent
   // format injection when embedded in the agent message text.
-  const rawName = asString(file.name) || "file";
-  const rawMimeType = asString(file.mimeType) || "application/octet-stream";
+  const rawName = asString(obj.filename) || "file";
+  const rawMimeType = asString(obj.mediaType) || "application/octet-stream";
   const name = rawName.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 200);
   const mimeType = rawMimeType.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 100);
 
   // URI-based file
-  const uri = asString(file.uri);
-  if (uri) {
-    return `[Attached: ${name} (${mimeType}) \u2192 ${uri}]`;
+  if (contentCase === "url") {
+    const uri = asString((content as { value?: unknown }).value);
+    if (uri) {
+      return `[Attached: ${name} (${mimeType}) \u2192 ${uri}]`;
+    }
+    return `[Attached: ${name} (${mimeType})]`;
   }
 
-  // Base64-encoded inline file
-  const bytes = asString(file.bytes);
-  if (bytes) {
-    const sizeKB = Math.ceil(decodedBase64Size(bytes) / 1024);
-    return `[Attached: ${name} (${mimeType}), inline ${sizeKB}KB]`;
+  // Inline raw bytes — `value` is a Buffer in the typed surface; at the
+  // JSON boundary it arrives as a base64 string. We accept either.
+  if (contentCase === "raw") {
+    const raw = (content as { value?: unknown }).value;
+    const bytes = Buffer.isBuffer(raw) ? raw.toString("base64") : asString(raw);
+    if (bytes) {
+      const sizeKB = Math.ceil(decodedBase64Size(bytes) / 1024);
+      return `[Attached: ${name} (${mimeType}), inline ${sizeKB}KB]`;
+    }
+    return `[Attached: ${name} (${mimeType})]`;
+  }
+
+  // contentCase === "data" — caller used the data variant for bytes.
+  // Mirror raw's base64 handling so callers who chose $case:"data"
+  // for binary content still get a size hint.
+  if (contentCase === "data") {
+    const raw = (content as { value?: unknown }).value;
+    const bytes = asString(raw);
+    if (bytes) {
+      const sizeKB = Math.ceil(decodedBase64Size(bytes) / 1024);
+      return `[Attached: ${name} (${mimeType}), inline ${sizeKB}KB]`;
+    }
+    return `[Attached: ${name} (${mimeType})]`;
   }
 
   return `[Attached: ${name} (${mimeType})]`;
@@ -154,20 +175,40 @@ function extractTextFragments(value: unknown): string[] {
     return [];
   }
 
-  if (obj.kind === "text" && typeof obj.text === "string") {
-    const trimmed = obj.text.trim();
-    return trimmed ? [trimmed] : [];
+  // v1.0 Part shape: discriminator is `content.$case`.
+  // The SDK's legacyCompat translates inbound v0.3 Parts to v1.0
+  // before the executor sees them, so this code only needs to
+  // recognize the v1.0 shape.
+  //
+  // File parts surface as $case "url" (URI) or "raw" (Buffer). Data
+  // parts surface as $case "data". The file-formatters also accept
+  // $case "data" as a bytes carrier for compatibility, but we check
+  // it after the dedicated DataPart branch so structured data wins.
+  const content = asObject(obj.content);
+  const contentCase = content ? (content as { $case?: unknown }).$case : undefined;
+
+  if (contentCase === "text") {
+    const value = (content as { value?: unknown }).value;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed ? [trimmed] : [];
+    }
+    return [];
   }
 
-  // Handle A2A FilePart: format as human-readable text for the agent
-  if (obj.kind === "file") {
-    const description = formatFilePartAsText(obj);
+  // Handle A2A DataPart: serialize structured data as human-readable
+  // text. Checked before the file branch because DataPart also uses
+  // $case "data"; we want structured JSON to win over the file
+  // bytes-carrier path.
+  if (contentCase === "data") {
+    const description = formatDataPartAsText(obj);
     return description ? [description] : [];
   }
 
-  // Handle A2A DataPart: serialize structured data as human-readable text
-  if (obj.kind === "data") {
-    const description = formatDataPartAsText(obj);
+  // Handle A2A FilePart: format as human-readable text for the agent.
+  // v1.0 file cases: "url", "raw".
+  if (contentCase === "url" || contentCase === "raw") {
+    const description = formatFilePartAsText(obj);
     return description ? [description] : [];
   }
 
@@ -176,9 +217,9 @@ function extractTextFragments(value: unknown): string[] {
     return parts.flatMap((part) => extractTextFragments(part));
   }
 
-  const content = Array.isArray(obj.content) ? obj.content : [];
-  if (content.length > 0) {
-    return content.flatMap((entry) => extractTextFragments(entry));
+  const contentArray = Array.isArray(obj.content) ? obj.content : [];
+  if (contentArray.length > 0) {
+    return contentArray.flatMap((entry) => extractTextFragments(entry));
   }
 
   if (typeof obj.text === "string") {
@@ -352,13 +393,18 @@ function buildResponseParts(response: AgentResponse): Part[] {
   const parts: Part[] = [];
 
   if (response.text) {
-    parts.push({ kind: "text", text: response.text });
+    parts.push({
+      content: { $case: "text", value: response.text },
+      filename: "",
+      mediaType: "text/plain",
+    });
   }
 
   for (const url of response.mediaUrls) {
     parts.push({
-      kind: "file",
-      file: { uri: url },
+      content: { $case: "url", value: url },
+      filename: "",
+      mediaType: "",
     });
   }
 
@@ -367,15 +413,20 @@ function buildResponseParts(response: AgentResponse): Part[] {
     const textUrls = extractUrlsFromText(response.text, response.mediaUrls);
     for (const url of textUrls) {
       parts.push({
-        kind: "file",
-        file: { uri: url },
+        content: { $case: "url", value: url },
+        filename: "",
+        mediaType: "",
       });
     }
   }
 
   // Ensure at least one part exists (A2A requires non-empty parts array)
   if (parts.length === 0) {
-    parts.push({ kind: "text", text: "" });
+    parts.push({
+      content: { $case: "text", value: "" },
+      filename: "",
+      mediaType: "text/plain",
+    });
   }
 
   return parts;
@@ -1319,7 +1370,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         kind: "message",
         messageId: uuidv4(),
         role: "agent",
-        parts: [{ kind: "text", text: `File validation failed: ${fileValidationError}` }],
+        parts: [{
+          content: { $case: "text", value: `File validation failed: ${fileValidationError}` },
+          filename: "",
+          mediaType: "text/plain",
+        }],
         contextId,
       };
       const rejectedTask: Task = {
@@ -1375,7 +1430,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         kind: "message",
         messageId: uuidv4(),
         role: "agent",
-        parts: [{ kind: "text", text: `Agent dispatch failed: ${errorMessage}` }],
+        parts: [{
+          content: { $case: "text", value: `Agent dispatch failed: ${errorMessage}` },
+          filename: "",
+          mediaType: "text/plain",
+        }],
         contextId,
       };
 
@@ -1570,12 +1629,20 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     if (parts.length === 0) return null;
 
     for (const part of parts) {
-      const file = asObject(part.file);
-      if (!file) continue;
+      // v1.0 Part shape: file URI sits on content.$case "url", bytes
+      // sit on content.$case "raw" (or "data" as a bytes carrier).
+      const content = asObject(part.content);
+      if (!content) continue;
+      const contentCase = (content as { $case?: unknown }).$case;
+      const contentValue = (content as { value?: unknown }).value;
 
-      const uri = asString(file.uri);
-      const mimeType = asString(file.mimeType);
-      const bytes = asString(file.bytes);
+      const uri = contentCase === "url" ? asString(contentValue) : undefined;
+      const mimeType = asString(part.mediaType);
+      // raw: Buffer or string at the wire boundary (base64 in JSON).
+      const bytesRaw =
+        contentCase === "raw" || contentCase === "data"
+          ? (Buffer.isBuffer(contentValue) ? contentValue.toString("base64") : asString(contentValue))
+          : undefined;
 
       // URI-based file: scheme + IP literal check + MIME
       if (uri) {
@@ -1589,8 +1656,8 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       }
 
       // Inline base64 file: size + MIME check
-      if (bytes) {
-        const decodedSize = decodedBase64Size(bytes);
+      if (bytesRaw) {
+        const decodedSize = decodedBase64Size(bytesRaw);
         const sizeCheck = checkFileSize(decodedSize, this.security.maxInlineFileSizeBytes);
         if (!sizeCheck.ok) {
           return `Inline file too large: ${sizeCheck.reason}`;
@@ -1609,7 +1676,10 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     if (!value || typeof value !== "object") return results;
 
     const obj = value as Record<string, unknown>;
-    if (obj.kind === "file" && obj.file) {
+    // v1.0 Part shape: file parts use content.$case "url" or "raw".
+    const content = asObject(obj.content);
+    const contentCase = content ? (content as { $case?: unknown }).$case : undefined;
+    if (contentCase === "url" || contentCase === "raw") {
       results.push(obj);
       return results;
     }
@@ -1618,7 +1688,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     for (const p of parts) {
       if (p && typeof p === "object") {
         const part = p as Record<string, unknown>;
-        if (part.kind === "file" && part.file) {
+        const partContent = asObject(part.content);
+        const partCase = partContent ? (partContent as { $case?: unknown }).$case : undefined;
+        if (partCase === "url" || partCase === "raw") {
           results.push(part);
         }
       }
