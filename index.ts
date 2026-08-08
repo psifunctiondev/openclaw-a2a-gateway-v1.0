@@ -510,6 +510,13 @@ const plugin = {
       app.use("/.well-known/agent.json", cardEndpointHandler);
     }
 
+    // TODO(legacyCompat-removal): once all peers are on A2A v1.0
+    // (Phronesis + any future peers), remove legacyCompat from this
+    // jsonRpcHandler AND from the three transport factories in
+    // src/client.ts:126-128. The compat layer silently widens the
+    // attack surface (accepts v0.3 envelopes) — fine during
+    // transition, footgun in steady state. Track in the v1.0 port
+    // checklist; ship a follow-up removal PR after Phases 2a-d land.
     app.use(
       "/a2a/jsonrpc",
       createHttpMetricsMiddleware("jsonrpc"),
