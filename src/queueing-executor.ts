@@ -33,7 +33,11 @@ function statusMessage(contextId: string, text: string): Message {
     messageId: uuidv4(),
     role: "agent",
     contextId,
-    parts: [{ kind: "text", text }],
+    parts: [{
+      content: { $case: "text", value: text },
+      filename: "",
+      mediaType: "text/plain",
+    }],
   };
 }
 
@@ -230,9 +234,13 @@ export class QueueingAgentExecutor implements AgentExecutor {
       ) {
         finalState = status.state;
         if (status.state !== "completed") {
+          // v1.0 Part shape: read content.value when $case is "text".
+          const firstPart = status.message?.parts?.[0] as
+            | { content?: { $case?: string; value?: unknown } }
+            | undefined;
           finalErrorMessage =
-            typeof status.message?.parts?.[0] === "object" && status.message.parts[0]?.kind === "text"
-              ? status.message.parts[0].text
+            firstPart?.content?.$case === "text" && typeof firstPart.content.value === "string"
+              ? firstPart.content.value
               : finalErrorMessage;
         }
       }
