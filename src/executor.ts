@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 
 import type { Message, Part, Task } from "@a2a-js/sdk";
+import { AgentEvent } from "@a2a-js/sdk/server";
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 
 import type { GatewayConfig, OpenClawPluginApi } from "./types.js";
@@ -1360,7 +1361,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       },
       history: existingHistory,
     };
-    eventBus.publish(workingTask);
+    eventBus.publish(AgentEvent.task(workingTask));
 
     // Validate inbound FileParts before dispatching to the agent
     const fileValidationError = this.validateInboundFileParts(requestContext.userMessage);
@@ -1388,7 +1389,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         },
         history: existingHistory,
       };
-      eventBus.publish(rejectedTask);
+      eventBus.publish(AgentEvent.task(rejectedTask));
       eventBus.finished();
       return;
     }
@@ -1408,7 +1409,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         },
         history: existingHistory,
       };
-      eventBus.publish(heartbeatTask);
+      eventBus.publish(AgentEvent.task(heartbeatTask));
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
     try {
@@ -1450,7 +1451,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         history: existingHistory,
       };
 
-      eventBus.publish(failedTask);
+      eventBus.publish(AgentEvent.task(failedTask));
       eventBus.finished();
       return;
     }
@@ -1486,7 +1487,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       ],
     };
 
-    eventBus.publish(completedTask);
+    eventBus.publish(AgentEvent.task(completedTask));
     eventBus.finished();
   }
 
@@ -1513,7 +1514,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         timestamp: new Date().toISOString(),
       },
     };
-    eventBus.publish(canceledTask);
+    eventBus.publish(AgentEvent.task(canceledTask));
     this.taskContextByTaskId.delete(taskId);
     eventBus.finished();
   }
