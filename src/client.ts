@@ -274,17 +274,47 @@ export class A2AClient {
       });
       const agentCard = await resolver.resolve(baseUrl, path);
 
-      // Build transport list: main URL + additionalInterfaces
-      const mainTransport = agentCard.preferredTransport ?? "JSONRPC";
-      const allInterfaces: TransportEndpoint[] = [
-        { url: agentCard.url, transport: mainTransport },
-      ];
+      // Build transport list. v1.0 peers advertise `supportedInterfaces[]`;
+      // v0.3 peers advertise top-level `url` + `preferredTransport` +
+      // `additionalInterfaces[]`. Read the v1.0 list first, fall back to
+      // v0.3 fields if absent. See a2a-v1-migration-brief §3.
+      const allInterfaces: TransportEndpoint[] = [];
 
-      if (agentCard.additionalInterfaces) {
-        for (const iface of agentCard.additionalInterfaces) {
-          // Avoid duplicate of the main endpoint
-          if (iface.url !== agentCard.url || iface.transport !== mainTransport) {
-            allInterfaces.push({ url: iface.url, transport: iface.transport });
+      const v1Interfaces = (agentCard as unknown as {
+        supportedInterfaces?: Array<{ url?: string; protocolBinding?: string }>;
+      }).supportedInterfaces;
+
+      if (v1Interfaces && v1Interfaces.length > 0) {
+        // v1.0 path: each entry has `url` + `protocolBinding` (JSONRPC, GRPC, HTTP+JSON).
+        for (const iface of v1Interfaces) {
+          if (!iface.url) continue;
+          const transport = iface.protocolBinding ?? "JSONRPC";
+          // Dedupe by URL within this run.
+          if (!allInterfaces.some((e) => e.url === iface.url)) {
+            allInterfaces.push({ url: iface.url, transport });
+          }
+        }
+      } else {
+        // v0.3 fallback path: top-level url + additionalInterfaces[].
+        const legacyCard = agentCard as unknown as {
+          url?: string;
+          preferredTransport?: string;
+          additionalInterfaces?: Array<{ url?: string; transport?: string }>;
+        };
+        const mainTransport = legacyCard.preferredTransport ?? "JSONRPC";
+        if (legacyCard.url) {
+          allInterfaces.push({ url: legacyCard.url, transport: mainTransport });
+        }
+        if (legacyCard.additionalInterfaces) {
+          for (const iface of legacyCard.additionalInterfaces) {
+            if (!iface.url || !iface.transport) continue;
+            if (
+              !allInterfaces.some(
+                (e) => e.url === iface.url && e.transport === iface.transport,
+              )
+            ) {
+              allInterfaces.push({ url: iface.url, transport: iface.transport });
+            }
           }
         }
       }
