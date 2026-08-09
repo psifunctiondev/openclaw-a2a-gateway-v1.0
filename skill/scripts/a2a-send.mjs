@@ -39,6 +39,7 @@ import {
   RestTransportFactory,
   createAuthenticatingFetchWithRetry,
 } from "@a2a-js/sdk/client";
+import { Role } from "@a2a-js/sdk";
 import { GrpcTransportFactory } from "@a2a-js/sdk/client/grpc";
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -221,17 +222,25 @@ async function main() {
   // Discover agent card and create client (with retry for transient network errors)
   const client = await retryOnConnectionError(() => factory.createFromUrl(peerUrl));
 
-  // Build message parts: text + optional file
+  // Build message parts: text + optional file.
+  // v1.0 SDK Part shape: { content: { $case, value }, filename?, mediaType? }
+  // The legacy `{ kind: "text", text: ... }` shape is silently dropped by the SDK
+  // encoder and produces `parts: [{}]` on the wire. See @a2a-js/sdk v1.0.1
+  // dist/a2a-4AAMnZHp.d.ts:125-149 for the Part type definition.
   const outboundParts = [];
   if (message) {
-    outboundParts.push({ kind: "text", text: message });
+    outboundParts.push({
+      content: { $case: "text", value: message },
+      mediaType: "text/plain",
+    });
   }
 
   const fileUri = opts.fileUri;
   const filePath = opts.filePath;
 
   if (filePath) {
-    // Read local file, base64-encode, auto-detect MIME
+    // Read local file as a Buffer. SDK Part.raw expects a Buffer, not a base64
+    // string — the encoder handles base64 conversion on its own.
     const stat = statSync(filePath);
     if (stat.size > MAX_INLINE_FILE_SIZE) {
       console.error(`File too large: ${(stat.size / 1048576).toFixed(1)}MB exceeds 10MB limit`);
@@ -243,17 +252,18 @@ async function main() {
       process.exit(2);
     }
     const fileBuffer = readFileSync(filePath);
-    const base64 = fileBuffer.toString("base64");
     const name = filePath.split("/").pop() || "file";
     outboundParts.push({
-      kind: "file",
-      file: { bytes: base64, mimeType, name },
+      content: { $case: "raw", value: fileBuffer },
+      filename: name,
+      mediaType: mimeType,
     });
   } else if (fileUri) {
-    // URI-based file reference
+    // URI-based file reference. MIME type is best-effort from the URL extension;
+    // receivers can override via the mediaType field if they need to.
     outboundParts.push({
-      kind: "file",
-      file: { uri: fileUri },
+      content: { $case: "url", value: fileUri },
+      mediaType: detectMimeFromPath(fileUri) || "application/octet-stream",
     });
   }
 
@@ -265,7 +275,7 @@ async function main() {
   const outboundMessage = {
     kind: "message",
     messageId: randomUUID(),
-    role: "user",
+    role: Role.ROLE_USER,
     parts: outboundParts,
     ...(continuationTaskId ? { taskId: continuationTaskId } : {}),
     ...(continuationContextId ? { contextId: continuationContextId } : {}),
