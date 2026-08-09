@@ -33,8 +33,13 @@ describe("zero-config install (issue #7)", () => {
     });
     const card = buildAgentCard(minimalConfig as unknown as GatewayConfig) as Record<string, unknown>;
     assert.equal(card.name, "OpenClaw A2A Gateway", "should use default name");
-    assert.equal(card.protocolVersion, "0.3.0");
     assert.equal(card.description, "A2A bridge for OpenClaw agents");
+    // v1.0: protocolVersion lives on each supportedInterface, not at top level.
+    assert.equal(card.protocolVersion, undefined, "top-level protocolVersion should be removed in v1.0");
+    const interfaces = card.supportedInterfaces as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(interfaces) && interfaces.length >= 1, "supportedInterfaces must be non-empty");
+    assert.equal(interfaces[0].protocolVersion, "1.0", "first interface must be v1.0");
+    assert.equal(interfaces[0].protocolBinding, "JSONRPC", "first interface must be JSON-RPC");
   });
 });
 
@@ -134,8 +139,13 @@ describe("a2a-gateway plugin", () => {
     });
 
     const payload = buildAgentCard(config) as Record<string, unknown>;
-    const interfaces = payload.additionalInterfaces as Array<Record<string, unknown>>;
-    assert.equal(interfaces[2]?.url, "127.0.0.1:18801");
+    // v1.0: gRPC URL is advertised as a supportedInterface with
+    // protocolBinding: "GRPC" (no separate `additionalInterfaces[]`).
+    const interfaces = payload.supportedInterfaces as Array<Record<string, unknown>>;
+    const grpcIface = interfaces.find((i) => i.protocolBinding === "GRPC");
+    assert.ok(grpcIface, "must advertise a GRPC supportedInterface");
+    assert.equal(grpcIface.url, "127.0.0.1:18801");
+    assert.equal(grpcIface.protocolVersion, "1.0");
   });
 
   it("derives published gRPC URL from the same base URL when agentCard.grpcProxy is true", () => {
@@ -153,8 +163,11 @@ describe("a2a-gateway plugin", () => {
     });
 
     const payload = buildAgentCard(config) as Record<string, unknown>;
-    const interfaces = payload.additionalInterfaces as Array<Record<string, unknown>>;
-    assert.equal(interfaces[2]?.url, "http://127.0.0.1:18800");
+    const interfaces = payload.supportedInterfaces as Array<Record<string, unknown>>;
+    const grpcIface = interfaces.find((i) => i.protocolBinding === "GRPC");
+    assert.ok(grpcIface, "must advertise a GRPC supportedInterface");
+    assert.equal(grpcIface.url, "http://127.0.0.1:18800");
+    assert.equal(grpcIface.protocolVersion, "1.0");
   });
 
   it("dispatches inbound messages via gateway RPC", async () => {
