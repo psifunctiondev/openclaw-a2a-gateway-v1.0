@@ -31,8 +31,12 @@ export interface PushNotificationConfig {
    * @default 1.0
    */
   importance?: number;
-  /** Timestamp (ms) when the notification was registered. */
-  createdAt?: number;
+  /**
+   * ISO 8601 timestamp (UTC, ms precision, `YYYY-MM-DDTHH:mm:ss.sssZ`)
+   * when the notification was registered. Per A2A v1.0 spec §10
+   * ("Timestamps"). Format matches `new Date().toISOString()`.
+   */
+  createdAt?: string;
 }
 
 /**
@@ -106,7 +110,7 @@ export class PushNotificationStore {
   register(taskId: string, config: PushNotificationConfig): void {
     this.registrations.set(taskId, {
       ...config,
-      createdAt: config.createdAt ?? Date.now(),
+      createdAt: config.createdAt ?? new Date().toISOString(),
       importance: config.importance ?? 1.0,
     });
   }
@@ -212,10 +216,12 @@ export class PushNotificationStore {
     const maxRetries = decayConfig.maxRetries ?? DEFAULT_MAX_RETRIES;
     const baseDelay = decayConfig.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
     const initial = config.importance ?? 1.0;
-    const createdAt = config.createdAt ?? Date.now();
+    const createdAt = config.createdAt ?? new Date().toISOString();
+    // Convert ISO 8601 timestamp to ms for decay math.
+    const createdAtMs = Date.parse(createdAt);
 
     // Check if already below threshold
-    const currentImp = computeImportance(initial, Date.now() - createdAt, k);
+    const currentImp = computeImportance(initial, Date.now() - createdAtMs, k);
     if (currentImp < minImp) {
       this.registrations.delete(taskId);
       return { ok: false, error: `importance decayed below threshold (${currentImp.toFixed(3)} < ${minImp})` };
@@ -231,7 +237,7 @@ export class PushNotificationStore {
       }
 
       // Check importance before retrying
-      const imp = computeImportance(initial, Date.now() - createdAt, k);
+      const imp = computeImportance(initial, Date.now() - createdAtMs, k);
       if (imp < minImp) {
         this.registrations.delete(taskId);
         return { ok: false, error: `importance decayed below threshold (${imp.toFixed(3)} < ${minImp})` };

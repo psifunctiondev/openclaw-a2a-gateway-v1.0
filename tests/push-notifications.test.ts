@@ -26,6 +26,35 @@ describe("PushNotificationStore", () => {
     assert.equal(result.url, "https://example.com/hook");
   });
 
+  it("register sets createdAt as ISO 8601 UTC string (A2A v1.0 spec §10)", () => {
+    // Per the A2A v1.0 spec, timestamps are explicit ISO 8601 UTC with
+    // millisecond precision in the form `YYYY-MM-DDTHH:mm:ss.sssZ`.
+    // https://github.com/a2aproject/A2A/blob/main/docs/whats-new-v1.md#timestamps
+    const before = Date.now();
+    store.register("task-iso", { url: "https://example.com/hook" });
+    const after = Date.now();
+    const config = store.get("task-iso");
+    assert.ok(config?.createdAt, "createdAt should be set on register");
+    // Shape check: `YYYY-MM-DDTHH:mm:ss.sssZ` (24 chars).
+    assert.match(
+      config.createdAt,
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      "createdAt must match ISO 8601 ms-precision UTC format",
+    );
+    // Round-trip check: Date.parse should yield a valid ms timestamp
+    // within the register call window.
+    const ms = Date.parse(config.createdAt);
+    assert.ok(Number.isFinite(ms), "createdAt must be parseable by Date.parse");
+    assert.ok(ms >= before && ms <= after, "createdAt ms must be within register window");
+  });
+
+  it("register preserves caller-provided createdAt as ISO 8601 string", () => {
+    const ts = "2026-08-09T19:30:00.000Z";
+    store.register("task-provided", { url: "https://example.com/hook", createdAt: ts });
+    const config = store.get("task-provided");
+    assert.equal(config?.createdAt, ts);
+  });
+
   it("has returns true for registered tasks", () => {
     store.register("task-1", { url: "https://example.com/hook" });
     assert.equal(store.has("task-1"), true);
