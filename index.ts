@@ -530,6 +530,7 @@ const plugin = {
     app.use(
       "/a2a/jsonrpc",
       createHttpMetricsMiddleware("jsonrpc"),
+      normalizeV03ToV1JsonRpcBody(),
       jsonRpcHandler({
         requestHandler,
         userBuilder,
@@ -603,6 +604,118 @@ const plugin = {
     }
 
     // Bearer auth middleware for push notification endpoints
+    // Normalize v0.3 wire format in JSON-RPC request bodies to v1.0
+    // before the SDK's jsonRpcHandler processes them.
+    //
+    // Background: the SDK's `legacyCompat: { enabled: true }` only routes to
+    // the v0.3 handler when the RPC method name is v0.3 style
+    // (`message/send`, `tasks/get`). When a peer uses v1.0 method names
+    // (`SendMessage`, `GetTask`) but v0.3 wire format in the body
+    // (role with `ROLE_` prefix, parts with `kind` field instead of `$case`
+    // discriminator), the SDK doesn't detect the mismatch and routes to its
+    // v1.0 `JsonRpcTransportHandler`. That handler can't decode the body
+    // and throws — the result is the malformed task with `state:
+    // "UNRECOGNIZED"` and `role: "UNRECOGNIZED"` that the wire probe
+    // showed on 2026-08-10.
+    //
+    // This middleware detects v0.3 indicators in the body regardless of
+    // method name and normalizes the message in-place before the SDK sees
+    // it. The SDK's existing legacyCompat path is unchanged for pure-v0.3
+    // requests (method name + body both v0.3) — this only fills the
+    // mixed-method-name-with-v0.3-body gap.
+    //
+    // Idempotent: a body that's already v1.0 wire format is left untouched.
+    // Failure-soft: if normalization throws, the body is passed through and
+    // the SDK returns its normal error response (preserves existing behavior
+    // for genuinely malformed requests).
+    //
+    // Note: the SDK has an internal `toCoreMessage` (in dist/compat/v0_3/server)
+    // that does this conversion, but it's not exported. We inline the
+    // conversion here so we don't depend on an SDK internal. The mapping is
+    // straightforward and matches the SDK's documented wire-format mapping.
+    const v03RoleToV1 = (role: unknown): string | undefined => {
+      if (role === "ROLE_USER" || role === "user") return "user";
+      if (role === "ROLE_AGENT" || role === "agent") return "agent";
+      return undefined;
+    };
+    const v03PartToV1 = (part: unknown): unknown => {
+      if (!part || typeof part !== "object") return part;
+      const p = part as Record<string, unknown>;
+      if (typeof p.kind !== "string") return part; // already v1.0 or unknown
+      if (p.kind === "text" && typeof p.text === "string") {
+        return {
+          content: { $case: "text", value: p.text },
+          mediaType: typeof p.mediaType === "string" ? p.mediaType : "text/plain",
+          filename: "",
+        };
+      }
+      if (p.kind === "file" && p.file && typeof p.file === "object") {
+        const file = p.file as Record<string, unknown>;
+        const filename = typeof file.name === "string" ? file.name : "";
+        const mediaType = typeof file.mimeType === "string" ? file.mimeType : "";
+        if (typeof file.bytes === "string") {
+          return {
+            content: { $case: "raw", value: Buffer.from(file.bytes, "base64") },
+            mediaType,
+            filename,
+          };
+        }
+        if (typeof file.uri === "string") {
+          return {
+            content: { $case: "url", value: file.uri },
+            mediaType,
+            filename,
+          };
+        }
+      }
+      if (p.kind === "data") {
+        return {
+          content: { $case: "data", value: p.data },
+          filename: "",
+          mediaType: "",
+        };
+      }
+      // Unknown v0.3 kind — leave as-is and let the SDK surface an error.
+      return part;
+    };
+    const normalizeV03ToV1JsonRpcBody = (): express.RequestHandler => {
+      return (req, _res, next) => {
+        try {
+          const body = req.body as Record<string, unknown> | undefined;
+          if (!body || typeof body !== "object") return next();
+          const params = body.params as Record<string, unknown> | undefined;
+          const message = params?.message as Record<string, unknown> | undefined;
+          if (!message || typeof message !== "object") return next();
+
+          // v0.3 indicator: role has `ROLE_` prefix (v1.0 uses lowercase
+          // `user`/`agent`).
+          const isV03Role = typeof message.role === "string" && message.role.startsWith("ROLE_");
+          // v0.3 indicator: parts have `kind` field (v1.0 uses `content.$case`
+          // discriminator per the protobuf-TS shape).
+          const isV03Parts = Array.isArray(message.parts) && message.parts.some(
+            (p: unknown) => typeof p === "object" && p !== null && "kind" in (p as Record<string, unknown>),
+          );
+
+          if (!isV03Role && !isV03Parts) return next();
+
+          const normalizedRole = v03RoleToV1(message.role);
+          const normalizedParts = Array.isArray(message.parts)
+            ? message.parts.map(v03PartToV1)
+            : message.parts;
+
+          const normalizedMessage: Record<string, unknown> = { ...message };
+          if (normalizedRole !== undefined) normalizedMessage.role = normalizedRole;
+          normalizedMessage.parts = normalizedParts;
+          req.body = { ...body, params: { ...params, message: normalizedMessage } };
+          return next();
+        } catch (_e) {
+          // Failure-soft: pass through and let the SDK produce its normal
+          // error response for genuinely malformed input.
+          return next();
+        }
+      };
+    };
+
     const pushAuthMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (config.security.inboundAuth === "bearer" && config.security.validTokens.size > 0) {
         const authHeader = req.headers.authorization;
