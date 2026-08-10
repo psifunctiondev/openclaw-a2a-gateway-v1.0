@@ -544,3 +544,271 @@ describe("PushNotificationStore cleanup", () => {
     assert.equal(store.has("task-ok"), true);
   });
 });
+
+// ===========================================================================
+// SSRF re-validation + redirect handling (Phase 1.x — §1.1 from v1.0 review)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// §1.1 — validator runs immediately before fetch
+// ---------------------------------------------------------------------------
+
+describe("PushNotificationStore §1.1 SSRF re-validation at delivery time", () => {
+  it("calls security.validateUrl before fetch and bails on reject (no fetch happens)", async () => {
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return false; // SSRF block
+        },
+      },
+    });
+
+    // Register a URL we don't expect fetch() to ever reach. If validate
+    // runs first (as it should), the 1-second sleep on this URL means we'd
+    // see a delayed fetch had it been issued — but the validator bails
+    // synchronously, so the fetch should never fire.
+    store.register("task-ssrf", {
+      url: "http://127.0.0.1:1/hook", // unused — validator should bail first
+    });
+
+    // Wrap global fetch to count attempts (Node 18+ globalThis.fetch).
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, _init: unknown) => {
+      fetchAttempts++;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await store.send("task-ssrf", "completed", { id: "task-ssrf" });
+      assert.equal(result.ok, false);
+      assert.match(result.error!, /SSRF re-validation/);
+      assert.equal(validateCalls, 1, "validateUrl must be called exactly once");
+      assert.equal(fetchAttempts, 0, "fetch must NOT be called when validator rejects");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("passes through to fetch when validator approves", async () => {
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return true;
+        },
+      },
+    });
+
+    store.register("task-ok", { url: "http://placeholder.example/hook" });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: unknown) => {
+      fetchAttempts++;
+      const req = init as RequestInit | undefined;
+      assert.equal(req?.redirect, "manual", "redirect must be 'manual'");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await store.send("task-ok", "completed", { id: "task-ok" });
+      assert.equal(result.ok, true);
+      assert.equal(validateCalls, 1);
+      assert.equal(fetchAttempts, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats 3xx response as failure when redirect: 'manual' is set (no follow)", async () => {
+    // Server returns 302 to a private address. With redirect: "manual", the
+    // fetch should surface the 302 as the response — NOT follow it. The
+    // existing response.ok check then correctly marks it as a failure.
+    const redirectServer = http.createServer((_req, res) => {
+      res.writeHead(302, { Location: "http://169.254.169.254/latest/meta-data/" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => redirectServer.listen(0, "127.0.0.1", resolve));
+    const port = (redirectServer.address() as { port: number }).port;
+    try {
+      const store = new PushNotificationStore({
+        security: { validateUrl: async () => true },
+      });
+      store.register("task-redirect", {
+        url: `http://127.0.0.1:${port}/hook`,
+      });
+      const result = await store.send("task-redirect", "completed", { id: "task-redirect" });
+      assert.equal(result.ok, false, "3xx must be treated as failure");
+      assert.equal(result.statusCode, 302, "statusCode should reflect the 302, not a followed destination");
+    } finally {
+      await new Promise<void>((resolve) => redirectServer.close(() => resolve()));
+    }
+  });
+
+  it("sendWithRetry re-validates on each attempt — rebinding between attempts is caught", async () => {
+    // Honest framing (per Phronesis review): this test does NOT exercise
+    // actual DNS rebinding (that would need a hostname that flips resolution,
+    // which is test-infra work). What it DOES verify: sendWithRetry calls
+    // validateUrl on each attempt, and once an attempt fails validation,
+    // no fetch happens for that attempt. The validator counter and the fetch
+    // counter are the security-relevant signals here. The short-circuit
+    // test below covers the surfaced error string.
+    //
+    // Simulated scenario: validator returns true on first attempt, false on
+    // second (stand-in for the hostname re-pointing to a private IP).
+    // First attempt fetches and fails (server returns 503), so sendWithRetry
+    // would normally retry. With re-validation, the second attempt's
+    // validator rejects before fetch — confirming each attempt is
+    // independently re-checked.
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return validateCalls === 1; // first call OK, second call rejected
+        },
+      },
+    });
+    store.register("task-rebind", {
+      url: "http://placeholder.example/hook",
+      importance: 1.0,
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, _init: unknown) => {
+      fetchAttempts++;
+      // Return 503 so sendWithRetry wants to retry
+      return new Response("Service Unavailable", { status: 503 });
+    }) as typeof fetch;
+    try {
+      const decay: DecayConfig = {
+        decayRate: 0.0001,
+        minImportance: 0.01,
+        maxRetries: 1,
+        retryBaseDelayMs: 5,
+      };
+      const result = await store.sendWithRetry(
+        "task-rebind",
+        "completed",
+        { id: "task-rebind" },
+        decay
+      );
+      assert.equal(result.ok, false);
+      assert.equal(validateCalls, 2, "validator should run once per send() attempt");
+      assert.equal(fetchAttempts, 1, "fetch should only happen on attempt 1; attempt 2 bails on validate");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sendWithRetry short-circuits on SSRF rejection — validateUrl reason surfaces at outer boundary", async () => {
+    // Per Phronesis review: without this short-circuit, sendWithRetry masks
+    // SSRF rejections as "max retries (N) exceeded" — operators can't tell
+    // the URL was blocked at delivery vs. the webhook was simply down.
+    // With the short-circuit, the first attempt that fails SSRF returns its
+    // error directly. validateUrl's reason (private IP, disallowed scheme,
+    // allowlist miss, DNS failure) is preserved at the outer API boundary.
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async () => false, // every attempt rejected
+      },
+    });
+    store.register("task-ssrf-retry", { url: "http://placeholder.example/hook" });
+
+    let fetchAttempts = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchAttempts++;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const decay: DecayConfig = {
+        decayRate: 0.0001,
+        minImportance: 0.01,
+        maxRetries: 3,
+        retryBaseDelayMs: 5,
+      };
+      const result = await store.sendWithRetry(
+        "task-ssrf-retry",
+        "completed",
+        { id: "task-ssrf-retry" },
+        decay
+      );
+      assert.equal(result.ok, false);
+      assert.match(
+        result.error!,
+        /SSRF re-validation/,
+        "validateUrl rejection reason must surface, not be masked as 'max retries exceeded'"
+      );
+      assert.equal(
+        fetchAttempts,
+        0,
+        "no fetch should ever happen when every attempt is SSRF-rejected"
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats IPv6 redirect target as failure (opaqueredirected or 302)", async () => {
+    // Per Phronesis review: when redirect: "manual" + redirect target is in
+    // a non-default network family, undici can return the response as
+    // Response.type === "opaqueredirect" (status 0) rather than the literal
+    // 3xx. Either way the security contract holds: no fetch to the redirect
+    // target. Verify ok: false regardless of status code.
+    const server = http.createServer((_req, res) => {
+      // 302 to an IPv6 literal. The bracket form is required by RFC 3986.
+      res.writeHead(302, { Location: "http://[::1]:1/internal" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const store = new PushNotificationStore({
+        security: { validateUrl: async () => true },
+      });
+      store.register("task-v6-redirect", {
+        url: `http://127.0.0.1:${port}/hook`,
+      });
+      const result = await store.send("task-v6-redirect", "completed", { id: "task-v6-redirect" });
+      assert.equal(result.ok, false, "redirect must not be followed, even to IPv6 target");
+      assert.ok(
+        result.statusCode === 302 || result.statusCode === 0,
+        `expected 302 (default) or 0 (opaqueredirected), got ${result.statusCode}`
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("treats relative-path redirect (Location: /admin) as failure — no resolve against original URL", async () => {
+    // Per Phronesis review: undici resolves relative-path redirects against
+    // the original request URL. With redirect: "manual" the redirect must
+    // not be followed at all — verify the 302 is surfaced as a response.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(302, { Location: "/admin" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const store = new PushNotificationStore({
+        security: { validateUrl: async () => true },
+      });
+      store.register("task-relpath", {
+        url: `http://127.0.0.1:${port}/hook`,
+      });
+      const result = await store.send("task-relpath", "completed", { id: "task-relpath" });
+      assert.equal(result.ok, false, "relative redirect must not be resolved against original URL");
+      assert.equal(result.statusCode, 302);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

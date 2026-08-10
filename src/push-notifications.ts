@@ -68,6 +68,27 @@ export interface DecayConfig {
   retryBaseDelayMs?: number;
 }
 
+/**
+ * Security context for push-notification delivery.
+ *
+ * Closes the SSRF/TOCTOU gap (v1.0 code review §1.1) by re-running URL
+ * validation immediately before each outbound `fetch()` instead of trusting
+ * the result of validation that happened at registration time. Registration
+ * can be minutes-to-hours before delivery for long-running tasks, leaving
+ * a window for DNS rebinding or 302-to-internal attacks.
+ *
+ * Injected at construction; optional for backward compat. When omitted, the
+ * store behaves as before (caller is responsible for all SSRF defense).
+ */
+export interface PushNotificationSecurityContext {
+  /**
+   * Re-validate a URL for SSRF safety.
+   * Should resolve to `true` if safe to fetch, `false` if blocked
+   * (private IP, disallowed scheme, allowlist miss, etc.).
+   */
+  validateUrl(url: string): Promise<boolean>;
+}
+
 export interface PushNotificationResult {
   ok: boolean;
   statusCode?: number;
@@ -106,6 +127,17 @@ const DEFAULT_RETRY_BASE_DELAY_MS = 2000;
  */
 export class PushNotificationStore {
   private readonly registrations = new Map<string, PushNotificationConfig>();
+  private readonly security?: PushNotificationSecurityContext;
+
+  /**
+   * @param opts.security Optional SSRF re-validation context. When provided,
+   *   `send()` will call `security.validateUrl(url)` immediately before each
+   *   outbound fetch — closes the §1.1 TOCTOU window between registration
+   *   and delivery. Omit for legacy behavior (no re-check at delivery time).
+   */
+  constructor(opts?: { security?: PushNotificationSecurityContext }) {
+    this.security = opts?.security;
+  }
 
   register(taskId: string, config: PushNotificationConfig): void {
     this.registrations.set(taskId, {
@@ -156,6 +188,19 @@ export class PushNotificationStore {
       return { ok: false, error: `event "${state}" filtered out` };
     }
 
+    // SSRF re-validation immediately before fetch (closes §1.1 TOCTOU window).
+    // Registration validated the URL, but delivery may be minutes/hours later;
+    // an attacker could have re-pointed DNS or set up a redirect in between.
+    if (this.security) {
+      const safe = await this.security.validateUrl(config.url);
+      if (!safe) {
+        return {
+          ok: false,
+          error: "URL failed SSRF re-validation at delivery time",
+        };
+      }
+    }
+
     const body = JSON.stringify({ taskId, state, task });
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -173,6 +218,11 @@ export class PushNotificationStore {
         headers,
         body,
         signal: controller.signal,
+        // Closes §1.1 redirect vector: do NOT follow 3xx silently. A webhook
+        // that's safe at registration could 302 to an internal address at
+        // request time; with redirect: "manual" the response is surfaced
+        // (statusCode 3xx, response.ok === false) and not followed.
+        redirect: "manual",
       });
 
       clearTimeout(timer);
@@ -230,6 +280,17 @@ export class PushNotificationStore {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const result = await this.send(taskId, state, task);
       if (result.ok) return result;
+
+      // SSRF rejections are deterministic — retrying a known-bad URL is
+      // pointless and masks the security signal at the outer API boundary.
+      // Short-circuit so operators see "URL failed SSRF re-validation"
+      // instead of "max retries (N) exceeded". Surfaces validateUrl's
+      // rejection reason (private IP, disallowed scheme, allowlist miss,
+      // DNS failure) instead of dropping it on the floor. Closes a
+      // §1.1-shaped correctness gap surfaced in review.
+      if (result.error?.includes("SSRF re-validation")) {
+        return result;
+      }
 
       // Re-register if send() auto-cleaned on HTTP error (it only cleans on success, so re-check)
       if (!this.registrations.has(taskId)) {

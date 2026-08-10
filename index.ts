@@ -329,7 +329,17 @@ const plugin = {
       structuredLogs: config.observability.structuredLogs,
     });
     const auditLogger = new AuditLogger(config.observability.auditLogPath);
-    const pushStore = new PushNotificationStore();
+    const pushStore = new PushNotificationStore({
+      // Closes §1.1 SSRF/TOCTOU gap: re-run validateUri immediately before
+      // each outbound fetch so DNS rebinding or 302-to-internal between
+      // registration and delivery cannot redirect task payloads to attacker
+      // targets. Validation that happens at registration time is the
+      // *registration* check, not the *delivery* check — this injects the
+      // delivery check into the store.
+      security: {
+        validateUrl: (url) => validateUri(url, config.security).then((r) => r.ok),
+      },
+    });
     const client = new A2AClient();
     const taskStore = new FileTaskStore(config.storage.tasksDir);
     const executor = new QueueingAgentExecutor(
