@@ -544,3 +544,164 @@ describe("PushNotificationStore cleanup", () => {
     assert.equal(store.has("task-ok"), true);
   });
 });
+
+// ===========================================================================
+// SSRF re-validation + redirect handling (Phase 1.x — §1.1 from v1.0 review)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// §1.1 — validator runs immediately before fetch
+// ---------------------------------------------------------------------------
+
+describe("PushNotificationStore §1.1 SSRF re-validation at delivery time", () => {
+  it("calls security.validateUrl before fetch and bails on reject (no fetch happens)", async () => {
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return false; // SSRF block
+        },
+      },
+    });
+
+    // Register a URL we don't expect fetch() to ever reach. If validate
+    // runs first (as it should), the 1-second sleep on this URL means we'd
+    // see a delayed fetch had it been issued — but the validator bails
+    // synchronously, so the fetch should never fire.
+    store.register("task-ssrf", {
+      url: "http://127.0.0.1:1/hook", // unused — validator should bail first
+    });
+
+    // Wrap global fetch to count attempts (Node 18+ globalThis.fetch).
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, _init: unknown) => {
+      fetchAttempts++;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await store.send("task-ssrf", "completed", { id: "task-ssrf" });
+      assert.equal(result.ok, false);
+      assert.match(result.error!, /SSRF re-validation/);
+      assert.equal(validateCalls, 1, "validateUrl must be called exactly once");
+      assert.equal(fetchAttempts, 0, "fetch must NOT be called when validator rejects");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("passes through to fetch when validator approves", async () => {
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return true;
+        },
+      },
+    });
+
+    store.register("task-ok", { url: "http://placeholder.example/hook" });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: unknown) => {
+      fetchAttempts++;
+      const req = init as RequestInit | undefined;
+      assert.equal(req?.redirect, "manual", "redirect must be 'manual'");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await store.send("task-ok", "completed", { id: "task-ok" });
+      assert.equal(result.ok, true);
+      assert.equal(validateCalls, 1);
+      assert.equal(fetchAttempts, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats 3xx response as failure when redirect: 'manual' is set (no follow)", async () => {
+    // Server returns 302 to a private address. With redirect: "manual", the
+    // fetch should surface the 302 as the response — NOT follow it. The
+    // existing response.ok check then correctly marks it as a failure.
+    const redirectServer = http.createServer((_req, res) => {
+      res.writeHead(302, { Location: "http://169.254.169.254/latest/meta-data/" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => redirectServer.listen(0, "127.0.0.1", resolve));
+    const port = (redirectServer.address() as { port: number }).port;
+    try {
+      const store = new PushNotificationStore({
+        security: { validateUrl: async () => true },
+      });
+      store.register("task-redirect", {
+        url: `http://127.0.0.1:${port}/hook`,
+      });
+      const result = await store.send("task-redirect", "completed", { id: "task-redirect" });
+      assert.equal(result.ok, false, "3xx must be treated as failure");
+      assert.equal(result.statusCode, 302, "statusCode should reflect the 302, not a followed destination");
+    } finally {
+      await new Promise<void>((resolve) => redirectServer.close(() => resolve()));
+    }
+  });
+
+  it("sendWithRetry re-validates on each attempt — rebinding between attempts is caught", async () => {
+    // Simulate DNS rebinding: validator returns true on first attempt (the
+    // "old" IP is still safe), false on second (the "new" IP would be
+    // private). First attempt fetches and fails (server returns 503), so
+    // sendWithRetry would normally retry. With re-validation, the second
+    // attempt's validator rejects before fetch — confirming each attempt
+    // is independently re-checked.
+    //
+    // Note: sendWithRetry overrides the final error message to "max retries
+    // (N) exceeded" once retries are exhausted, so the SSRF rejection from
+    // attempt 2 is masked at the outer layer. We verify the per-attempt
+    // re-validation via the validateCalls/fetchAttempts counters, which are
+    // the security-relevant signal — not the surfaced error string.
+    let validateCalls = 0;
+    let fetchAttempts = 0;
+
+    const store = new PushNotificationStore({
+      security: {
+        validateUrl: async (_url) => {
+          validateCalls++;
+          return validateCalls === 1; // first call OK, second call rejected
+        },
+      },
+    });
+    store.register("task-rebind", {
+      url: "http://placeholder.example/hook",
+      importance: 1.0,
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, _init: unknown) => {
+      fetchAttempts++;
+      // Return 503 so sendWithRetry wants to retry
+      return new Response("Service Unavailable", { status: 503 });
+    }) as typeof fetch;
+    try {
+      const decay: DecayConfig = {
+        decayRate: 0.0001,
+        minImportance: 0.01,
+        maxRetries: 1,
+        retryBaseDelayMs: 5,
+      };
+      const result = await store.sendWithRetry(
+        "task-rebind",
+        "completed",
+        { id: "task-rebind" },
+        decay
+      );
+      assert.equal(result.ok, false);
+      assert.equal(validateCalls, 2, "validator should run once per send() attempt");
+      assert.equal(fetchAttempts, 1, "fetch should only happen on attempt 1; attempt 2 bails on validate");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
