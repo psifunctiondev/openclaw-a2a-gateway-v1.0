@@ -1,10 +1,20 @@
+import { TaskState } from "@a2a-js/sdk/server";
+
 import type { FileTaskStore } from "./task-store.js";
 import type { GatewayTelemetry } from "./telemetry.js";
 
 type LoggerLike = { info: (msg: string) => void; warn: (msg: string) => void };
 
-/** Terminal states that are safe to expire. */
-const TERMINAL_STATES = new Set(["completed", "failed", "canceled", "rejected"]);
+/** Terminal states that are safe to expire. Uses TaskState enum constants
+ *  so the comparison works against tasks whose status.state was set with the
+ *  enum integer (per Phronesis review 2026-08-10 21:41Z).
+ */
+const TERMINAL_STATES = new Set<TaskState>([
+  TaskState.TASK_STATE_COMPLETED,
+  TaskState.TASK_STATE_FAILED,
+  TaskState.TASK_STATE_CANCELED,
+  TaskState.TASK_STATE_REJECTED,
+]);
 const ACTIVE_CLEANUPS = new WeakSet<FileTaskStore>();
 
 export interface CleanupResult {

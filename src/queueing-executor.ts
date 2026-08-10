@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import type { Message, Task } from "@a2a-js/sdk";
 import {
   AgentEvent,
+  TaskState,
   type AgentExecutionEvent,
   type AgentExecutor,
   type ExecutionEventBus,
@@ -27,6 +28,12 @@ interface QueuedTaskEntry {
 }
 
 type TerminalTaskState = "completed" | "failed" | "canceled" | "rejected";
+// Note: TerminalTaskState stays as a string union for local type-narrowing only.
+// All values passed to the SDK at publish sites below MUST use TaskState.TASK_STATE_*
+// enum constants — string literals like "completed" / "working" / "failed" emit
+// state: "UNRECOGNIZED" on the wire because the SDK's proto3 enum decoder only
+// recognises the integer enum values (or the "TASK_STATE_*" string form).
+// Phronesis review 2026-08-10 21:41Z.
 
 function statusMessage(contextId: string, text: string): Message {
   return {
@@ -162,7 +169,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
           taskEvent(
             requestContext.taskId,
             requestContext.contextId,
-            "submitted",
+            TaskState.TASK_STATE_SUBMITTED,
             `Queued for execution (position ${this.queue.length})`,
           ),
         ),
@@ -178,7 +185,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         this.pendingByTaskId.delete(taskId);
         entry.eventBus.publish(
           AgentEvent.task(
-            taskEvent(taskId, entry.requestContext.contextId, "canceled", "Task canceled while queued"),
+            taskEvent(taskId, entry.requestContext.contextId, TaskState.TASK_STATE_CANCELED, "Task canceled while queued"),
           ),
         );
         entry.eventBus.finished();
@@ -234,13 +241,13 @@ export class QueueingAgentExecutor implements AgentExecutor {
         return;
       }
       if (
-        status.state === "completed" ||
-        status.state === "failed" ||
-        status.state === "canceled" ||
-        status.state === "rejected"
+        status.state === TaskState.TASK_STATE_COMPLETED ||
+        status.state === TaskState.TASK_STATE_FAILED ||
+        status.state === TaskState.TASK_STATE_CANCELED ||
+        status.state === TaskState.TASK_STATE_REJECTED
       ) {
         finalState = status.state;
-        if (status.state !== "completed") {
+        if (status.state !== TaskState.TASK_STATE_COMPLETED) {
           // v1.0 Part shape: read content.value when $case is "text".
           const firstPart = status.message?.parts?.[0] as
             | { content?: { $case?: string; value?: unknown } }
@@ -258,7 +265,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
       entry.resolve();
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      finalState = finalState || "failed";
+      finalState = finalState || ("failed" as TerminalTaskState);
       finalErrorMessage = finalErrorMessage || message;
       entry.reject(error instanceof Error ? error : new Error(message));
       return;
@@ -269,7 +276,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
       this.telemetry.recordTaskFinish(
         requestContext.taskId,
         requestContext.contextId,
-        finalState || "failed",
+        finalState || ("failed" as TerminalTaskState),
         Date.now() - startedAt,
         this.activeTasks,
         this.queue.length,
