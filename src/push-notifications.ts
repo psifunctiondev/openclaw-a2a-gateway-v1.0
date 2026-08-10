@@ -281,6 +281,17 @@ export class PushNotificationStore {
       const result = await this.send(taskId, state, task);
       if (result.ok) return result;
 
+      // SSRF rejections are deterministic — retrying a known-bad URL is
+      // pointless and masks the security signal at the outer API boundary.
+      // Short-circuit so operators see "URL failed SSRF re-validation"
+      // instead of "max retries (N) exceeded". Surfaces validateUrl's
+      // rejection reason (private IP, disallowed scheme, allowlist miss,
+      // DNS failure) instead of dropping it on the floor. Closes a
+      // §1.1-shaped correctness gap surfaced in review.
+      if (result.error?.includes("SSRF re-validation")) {
+        return result;
+      }
+
       // Re-register if send() auto-cleaned on HTTP error (it only cleans on success, so re-check)
       if (!this.registrations.has(taskId)) {
         this.registrations.set(taskId, config);
