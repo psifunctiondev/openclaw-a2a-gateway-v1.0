@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { TaskState } from "@a2a-js/sdk/server";
+import { TaskState } from "@a2a-js/sdk";
 
 import type { FileTaskStore } from "./task-store.js";
 

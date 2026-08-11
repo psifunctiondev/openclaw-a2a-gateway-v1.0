@@ -4,8 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import type { Message, Part, Task } from "@a2a-js/sdk";
-import { AgentEvent, TaskState } from "@a2a-js/sdk/server";
+import type { Message, Part, Task, TaskState } from "@a2a-js/sdk";
+import { AgentEvent } from "@a2a-js/sdk/server";
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 
 import type { GatewayConfig, OpenClawPluginApi } from "./types.js";

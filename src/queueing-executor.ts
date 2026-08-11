@@ -1,9 +1,8 @@
 import { v4 as uuidv4 } from "uuid";
 
-import type { Message, Task } from "@a2a-js/sdk";
+import type { Message, Task, TaskState } from "@a2a-js/sdk";
 import {
   AgentEvent,
-  TaskState,
   type AgentExecutionEvent,
   type AgentExecutor,
   type ExecutionEventBus,
