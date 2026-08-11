@@ -43,7 +43,8 @@ import { Role } from "@a2a-js/sdk";
 import { GrpcTransportFactory } from "@a2a-js/sdk/client/grpc";
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
+import { homedir } from "node:os";
 import { resolveConnection } from "./a2a-peers.mjs";
 
 const USAGE = `Usage: node a2a-send.mjs [--peer <name> | --peer-url <URL>] --message <TEXT> [--file-uri <url>] [--file-path <localpath>] [--task-id <id>] [--context-id <id>] [--non-blocking] [--wait] [--stream] [--timeout-ms <ms>] [--poll-ms <ms>] [--agent-id <openclaw-agent-id>] [--help]`;
@@ -126,6 +127,36 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Detects obvious placeholder / garbage tokens before they go on the wire.
+ * Real A2A bearer tokens are 32+ hex chars (or longer base64); placeholders
+ * are short, pure-punctuation, or all-the-same-char. Returning true here makes
+ * the script exit non-zero with a clear error instead of silently getting a
+ * "JsonRpcTransportError: unauthorized" from the peer.
+ */
+function isPlaceholderToken(token) {
+  if (typeof token !== "string" || token.length === 0) return true;
+  // Common placeholder patterns observed in practice
+  const placeholders = new Set(["***", "*", "<token>", "<TOKEN>", "REDACTED", "changeme", "TODO", "your-token-here"]);
+  if (placeholders.has(token)) return true;
+  // All-same-char (e.g. "aaaaaaaa...", "00000000...")
+  if (/^(.)\1+$/.test(token)) return true;
+  // Pure punctuation / non-token-like
+  if (/^[^a-zA-Z0-9]+$/.test(token)) return true;
+  // Real bearer tokens never contain whitespace. This catches the
+  // zsh/bash `***` glob-expansion case: when a user types
+  // `--token ***` unquoted in a directory with files, the shell expands
+  // `***` to a space-separated list of filenames, producing a token like
+  // "A2A_SDK_REVIEW_CN.md CHANGELOG.md LICENSE README.md ...". The
+  // script receives that whole string as a single argv element, so
+  // checking for whitespace catches the expansion artifact even though
+  // we can't see the original `***` anymore.
+  if (/\s/.test(token)) return true;
+  // Too short to be a real A2A token (real ones are >= 32 chars)
+  if (token.length < 16) return true;
+  return false;
+}
+
 const RETRYABLE_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT", "EPIPE"]);
 
 function isRetryableError(err) {
@@ -162,6 +193,29 @@ async function main() {
   const opts = parseArgs();
 
   const { url: peerUrl, token } = resolveConnection(opts);
+
+  // Fail-fast guard for placeholder/garbage tokens. Background: in the
+  // 2026-08-10 A2A PR #10/#11 work session, every "***" placeholder I typed
+  // in the CLI was sent verbatim to the peer and rejected as
+  // "JsonRpcTransportError: unauthorized" - hard to debug because the
+  // error message doesn't suggest the token was the problem. This guard
+  // catches the obvious cases at the CLI boundary instead of at the peer.
+  if (token) {
+    if (isPlaceholderToken(token)) {
+      console.error(
+        `Error: --token '${token}' looks like a placeholder. Replace it with the real bearer token. Sources (in order of preference):
+  1. peer config in ${process.env.HOME}/.openclaw/openclaw.json under plugins.entries.a2a-gateway.config.peers[].auth.token
+  2. peers registry at ${join(homedir(), 'a2a-peers.json')}
+  3. inbound/outbound secrets in ${process.env.HOME}/.openclaw/workspace/.secrets/`
+      );
+      process.exit(2);
+    }
+  } else {
+    console.error(
+      "Error: --token is required (or set A2A_TOKEN env var). Sources: peer config in openclaw.json, ~/.openclaw/a2a-peers.json, or ~/.openclaw/workspace/.secrets/a2a-inbound-token.txt."
+    );
+    process.exit(2);
+  }
   const message = opts.message;
   const targetAgentId = (opts["agent-id"] || opts.agentId || "").toString().trim();
   const continuationTaskId = (opts["task-id"] || opts.taskId || "").toString().trim().slice(0, 256);
