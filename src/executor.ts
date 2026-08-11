@@ -6,7 +6,7 @@ import os from "node:os";
 
 import type { Message, Part, Task } from "@a2a-js/sdk";
 import { AgentEvent, TaskState } from "@a2a-js/sdk/server";
-import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/server";
+import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 
 import type { GatewayConfig, OpenClawPluginApi } from "./types.js";
 import { enqueueDispatch } from "./dispatch-queue.js";
