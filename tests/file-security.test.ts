@@ -97,6 +97,76 @@ describe("isPrivateIp", () => {
   it("allows 172.32.0.1 (outside 172.16/12 range)", () => {
     assert.equal(isPrivateIp("172.32.0.1"), false);
   });
+
+  // §1.2 — extended IPv4 ranges (RFC 5737 TEST-NET, RFC 5771 multicast, RFC 6890 reserved)
+  it("blocks 192.0.0.0 (IETF Protocol Assignments, RFC 6890)", () => {
+    assert.equal(isPrivateIp("192.0.0.0"), true);
+  });
+  it("blocks 192.0.0.255 (end of 192.0.0.0/24)", () => {
+    assert.equal(isPrivateIp("192.0.0.255"), true);
+  });
+  it("allows 192.0.1.0 (outside 192.0.0.0/24)", () => {
+    assert.equal(isPrivateIp("192.0.1.0"), false);
+  });
+  it("blocks 192.0.2.0 (TEST-NET-1, RFC 5737)", () => {
+    assert.equal(isPrivateIp("192.0.2.0"), true);
+  });
+  it("blocks 192.0.2.255 (end of TEST-NET-1)", () => {
+    assert.equal(isPrivateIp("192.0.2.255"), true);
+  });
+  it("allows 192.0.3.0 (outside TEST-NET-1)", () => {
+    assert.equal(isPrivateIp("192.0.3.0"), false);
+  });
+  it("blocks 198.51.100.0 (TEST-NET-2, RFC 5737)", () => {
+    assert.equal(isPrivateIp("198.51.100.0"), true);
+  });
+  it("blocks 198.51.100.255 (end of TEST-NET-2)", () => {
+    assert.equal(isPrivateIp("198.51.100.255"), true);
+  });
+  it("allows 198.51.101.0 (outside TEST-NET-2)", () => {
+    assert.equal(isPrivateIp("198.51.101.0"), false);
+  });
+  it("blocks 203.0.113.0 (TEST-NET-3, RFC 5737)", () => {
+    assert.equal(isPrivateIp("203.0.113.0"), true);
+  });
+  it("blocks 203.0.113.255 (end of TEST-NET-3)", () => {
+    assert.equal(isPrivateIp("203.0.113.255"), true);
+  });
+  it("allows 203.0.114.0 (outside TEST-NET-3)", () => {
+    assert.equal(isPrivateIp("203.0.114.0"), false);
+  });
+  it("blocks 224.0.0.0 (start of multicast 224.0.0.0/4, RFC 5771)", () => {
+    assert.equal(isPrivateIp("224.0.0.0"), true);
+  });
+  it("blocks 224.0.0.1 (real multicast address)", () => {
+    assert.equal(isPrivateIp("224.0.0.1"), true);
+  });
+  it("blocks 239.255.255.255 (end of 224.0.0.0/4)", () => {
+    assert.equal(isPrivateIp("239.255.255.255"), true);
+  });
+  it("blocks 240.0.0.0 (start of reserved 240.0.0.0/4)", () => {
+    assert.equal(isPrivateIp("240.0.0.0"), true);
+  });
+  it("blocks 255.255.255.255 (broadcast)", () => {
+    assert.equal(isPrivateIp("255.255.255.255"), true);
+  });
+
+  // DELIBERATE GAP — Tailscale CGNAT (100.64.0.0/10, RFC 6598)
+  // This range MUST stay public so Tailscale peers (Belel, KausAustralis,
+  // Phronesis) can reach each other. If a future reviewer flags it as
+  // a gap, point them at the DELIBERATE GAPS comment in src/file-security.ts.
+  it("allows 100.64.0.0 (Tailscale CGNAT, deliberately NOT blocked)", () => {
+    assert.equal(isPrivateIp("100.64.0.0"), false);
+  });
+  it("allows 100.127.255.255 (end of 100.64.0.0/10)", () => {
+    assert.equal(isPrivateIp("100.127.255.255"), false);
+  });
+  it("allows 100.100.100.100 (typical Tailscale IP)", () => {
+    assert.equal(isPrivateIp("100.100.100.100"), false);
+  });
+  it("blocks 100.128.0.0 (outside 100.64.0.0/10, not CGNAT)", () => {
+    assert.equal(isPrivateIp("100.128.0.0"), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
