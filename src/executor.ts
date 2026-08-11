@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import type { Message, Part, Task } from "@a2a-js/sdk";
+import type { Message, Part, Task, TaskState } from "@a2a-js/sdk";
 import { AgentEvent } from "@a2a-js/sdk/server";
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 
@@ -1356,7 +1356,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       id: taskId,
       contextId,
       status: {
-        state: "working",
+        state: TaskState.TASK_STATE_WORKING,
         timestamp: new Date().toISOString(),
       },
       history: existingHistory,
@@ -1383,7 +1383,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         id: taskId,
         contextId,
         status: {
-          state: "failed",
+          state: TaskState.TASK_STATE_FAILED,
           message: rejectedMessage,
           timestamp: new Date().toISOString(),
         },
@@ -1404,7 +1404,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         id: taskId,
         contextId,
         status: {
-          state: "working",
+          state: TaskState.TASK_STATE_WORKING,
           timestamp: new Date().toISOString(),
         },
         history: existingHistory,
@@ -1444,7 +1444,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         id: taskId,
         contextId,
         status: {
-          state: "failed",
+          state: TaskState.TASK_STATE_FAILED,
           message: failedMessage,
           timestamp: new Date().toISOString(),
         },
@@ -1474,7 +1474,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       id: taskId,
       contextId,
       status: {
-        state: "completed",
+        state: TaskState.TASK_STATE_COMPLETED,
         message: responseMessage,
         timestamp: new Date().toISOString(),
       },
@@ -1510,7 +1510,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       id: taskId,
       contextId,
       status: {
-        state: "canceled",
+        state: TaskState.TASK_STATE_CANCELED,
         timestamp: new Date().toISOString(),
       },
     };
