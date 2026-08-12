@@ -678,7 +678,7 @@ const plugin = {
       // Unknown v0.3 kind — leave as-is and let the SDK surface an error.
       return part;
     };
-    const normalizeV03ToV1JsonRpcBody = (): express.RequestHandler => {
+    function normalizeV03ToV1JsonRpcBody(): express.RequestHandler {
       return (req, _res, next) => {
         try {
           const body = req.body as Record<string, unknown> | undefined;
@@ -714,7 +714,7 @@ const plugin = {
           return next();
         }
       };
-    };
+    }
 
     const pushAuthMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (config.security.inboundAuth === "bearer" && config.security.validTokens.size > 0) {
