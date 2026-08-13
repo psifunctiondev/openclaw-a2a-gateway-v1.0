@@ -1597,6 +1597,34 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   }
 
   private resolveGatewayRuntimeConfig(): GatewayRuntimeConfig {
+    // TEMP DEBUG START — Quinn 2026-08-10 16:12, Doxa — verify whether api.config is plugin-scoped or global
+    // Will be reverted once we have the answer.
+    try {
+      const apiConfig = asObject(this.api.config);
+      const gateway = asObject(apiConfig?.gateway);
+      const gatewayAuth = asObject(gateway?.auth);
+      const hooks = asObject(apiConfig?.hooks);
+      const debugInfo = {
+        ts: new Date().toISOString(),
+        apiConfigKeys: apiConfig ? Object.keys(apiConfig).sort() : null,
+        apiConfigTypeof: typeof this.api.config,
+        hasGateway: !!gateway,
+        hasGatewayAuth: !!gatewayAuth,
+        gatewayAuthTokenIsEmpty: typeof gatewayAuth?.token !== "string" || gatewayAuth.token.length === 0,
+        gatewayAuthTokenLength: typeof gatewayAuth?.token === "string" ? gatewayAuth.token.length : null,
+        hasHooks: !!hooks,
+        hooksTokenIsEmpty: typeof hooks?.token !== "string" || hooks.token.length === 0,
+      };
+      fs.appendFileSync("/tmp/a2a-plugin-debug.log", JSON.stringify(debugInfo) + "\n");
+    } catch (e) {
+      try {
+        fs.appendFileSync("/tmp/a2a-plugin-debug.log", "DEBUG_ERROR: " + String(e) + "\n");
+      } catch {
+        // swallow
+      }
+    }
+    // TEMP DEBUG END
+
     const config = asObject(this.api.config) || {};
     const gateway = asObject(config.gateway) || {};
     const gatewayAuth = asObject(gateway.auth) || {};
