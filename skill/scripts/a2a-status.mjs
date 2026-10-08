@@ -144,10 +144,29 @@ async function main() {
   // Single query mode
   if (!wait) {
     const task = await client.getTask({ id: taskId, historyLength: 20 }, requestOptions);
+
+    // JSON-RPC error body — fail-closed exit.
+    if (task && typeof task === "object" && "error" in task) {
+      if (json) {
+        console.log(JSON.stringify(task, null, 2));
+      } else {
+        console.error(`Error: ${JSON.stringify(task.error)}`);
+      }
+      process.exit(2);
+    }
+
     if (json) {
       console.log(JSON.stringify(task, null, 2));
     } else {
       console.log(formatTask(task));
+    }
+
+    // Single-query mode also keyed off `status.state`: completed exits 0,
+    // any terminal failure state exits 2. Non-terminal states (submitted,
+    // working, input-required, auth-required) return the result and exit 0.
+    const state = task?.status?.state;
+    if (state && terminalStates.has(state)) {
+      process.exit(state === "completed" ? 0 : 2);
     }
     return;
   }
@@ -156,8 +175,22 @@ async function main() {
   const startedAt = Date.now();
   let lastState = "";
 
+  // Fail-closed: a JSON-RPC error body (the SDK surfaces these as
+  // `{ error: ... }` rather than throwing) exits 2 instead of exiting 0 with
+  // the error printed.
+  const exitOnError = (extra) => {
+    console.log(JSON.stringify(extra ?? "", null, 2));
+    process.exit(2);
+  };
+
   while (true) {
     const task = await client.getTask({ id: taskId, historyLength: 20 }, requestOptions);
+
+    // JSON-RPC error body — fail-closed exit.
+    if (task && typeof task === "object" && "error" in task) {
+      exitOnError({ error: task.error });
+    }
+
     const state = task?.status?.state;
 
     // Print state transitions
@@ -170,7 +203,13 @@ async function main() {
       lastState = state;
     }
 
-    if (state && terminalStates.has(state)) return;
+    if (state && terminalStates.has(state)) {
+      // Fail-closed exit code: only `completed` is exit 0. Failure states
+      // (failed / canceled / rejected) exit 2. Decision keys off
+      // `status.state`, not `kind` — both successful and rejected tasks
+      // come back as task-kind objects.
+      process.exit(state === "completed" ? 0 : 2);
+    }
 
     if (state && blockedStates.has(state)) {
       console.error(`\nTask is blocked (${state}). It needs external action to proceed.`);

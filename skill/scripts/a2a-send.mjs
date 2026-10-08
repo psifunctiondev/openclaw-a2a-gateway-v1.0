@@ -221,6 +221,20 @@ async function main() {
   const continuationTaskId = (opts["task-id"] || opts.taskId || "").toString().trim().slice(0, 256);
   const continuationContextId = (opts["context-id"] || opts.contextId || "").toString().trim().slice(0, 256);
 
+  // Fail-closed: guard against unresolved ${VAR} interpolation in any
+  // outbound value. Today every value comes from a resolved source (opts /
+  // env / resolved token), but if env indirection is added later this
+  // catches a literal `${...}` reaching the wire before it leaks a peer URL
+  // or a token substring into logs.
+  const unresolved = (v) => typeof v === "string" && /\$\{[^}]+\}/.test(v);
+  if (unresolved(peerUrl) || unresolved(token) || unresolved(message)) {
+    console.error("Refusing to send: an outbound value contains an unresolved ${VAR} interpolation.");
+    console.error(`  peerUrl  = ${JSON.stringify(peerUrl).slice(0, 80)}`);
+    console.error(`  token    = ${token ? "<set>" : "<empty>"}`);
+    console.error(`  message  = ${JSON.stringify(message).slice(0, 80)}`);
+    process.exit(2);
+  }
+
   const nonBlocking = Boolean(opts["non-blocking"] || opts.nonBlocking);
   const wait = Boolean(opts.wait);
   const stream = Boolean(opts.stream);
@@ -406,11 +420,29 @@ async function main() {
   }
 
   // Async task mode: wait for terminal task state via tasks/get.
+  // Fail-closed: a JSON-RPC error body (or any non-task reply shape) exits 2
+  // rather than exiting 0 with the error printed — callers that gate on
+  // exit code (cron, scripts, CI) need a real failure signal.
+  const finalExitOnError = (extra) => {
+    console.log(JSON.stringify(extra ?? result, null, 2));
+    process.exit(2);
+  };
+
+  if (result && typeof result === "object" && "error" in result) {
+    finalExitOnError(result);
+  }
+
   const responseTaskId = result?.kind === "task" ? result.id : result?.taskId;
   if (!responseTaskId || typeof responseTaskId !== "string") {
-    // Can't wait if we don't know the task id.
-    console.log(JSON.stringify(result, null, 2));
-    return;
+    // We don't have a task id to poll. If the response is a message-kind
+    // reply, fall through to the synchronous reply print path (original
+    // behavior). Anything else (error body, malformed, unknown kind) is not
+    // a successful wait outcome — exit 2.
+    if (result?.kind === "message") {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    finalExitOnError(result);
   }
 
   if (result?.kind === "task") {
@@ -428,7 +460,11 @@ async function main() {
     if (state && terminalStates.has(state)) {
       const text = extractFirstTextParts(task.status?.message?.parts);
       console.log(text || JSON.stringify(task, null, 2));
-      return;
+      // Fail-closed exit code: only `completed` is exit 0. Failure states
+      // (failed / canceled / rejected) exit 2. Caller-side decision is keyed
+      // off `status.state`, not `kind` — both successful and rejected tasks
+      // have `kind: "task"`.
+      process.exit(state === "completed" ? 0 : 2);
     }
 
     if (state && blockedStates.has(state)) {
